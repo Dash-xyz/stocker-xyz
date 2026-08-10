@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Stocker</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="titlebar">
+        <h1>Stocker</h1>
+        <nav class="market-tabs" aria-label="市场筛选">
+          <button class="active" data-market="all">全部</button>
+          <button data-market="CN">A股</button>
+          <button data-market="HK">港股</button>
+          <button data-market="US">美股</button>
+          <button data-market="index">指数</button>
+        </nav>
+        <div class="window-space"></div>
+        <div class="window-controls" aria-label="窗口控制">
+          <button id="window-minimize" type="button" title="最小化" aria-label="最小化">−</button>
+          <button id="window-maximize" type="button" title="最大化" aria-label="最大化">□</button>
+          <button id="window-close" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+      </header>
+
+      <section class="toolbar" aria-label="操作栏">
+        <button class="icon-button" id="add-button" title="添加自选" aria-label="添加自选">+</button>
+        <button class="icon-button edit-watchlist" id="edit-watchlist-button" title="编辑自选" aria-label="编辑自选">✎</button>
+        <button class="icon-button refresh" id="refresh-button" title="刷新报价" aria-label="刷新报价">↻</button>
+        <span class="sync-status" id="sync-status">准备就绪</span>
+        <button class="icon-button settings" id="settings-button" title="刷新设置" aria-label="刷新设置">⚙</button>
+      </section>
+
+      <section class="watchlist" aria-label="自选股票">
+        <div class="table-head" id="quote-head"></div>
+        <div id="quote-list" class="quote-list" role="list"></div>
+        <div id="empty-state" class="empty-state" hidden>没有匹配的自选股</div>
+      </section>
+
+      <footer class="market-summary" id="market-summary">
+        <div class="summary-label"><span class="status-dot"></span><select id="market-index" aria-label="市场指数"></select></div>
+        <strong id="summary-price">--</strong>
+        <strong id="summary-change">--</strong>
+        <strong id="summary-percent">--</strong>
+      </footer>
+    </main>
+
+    <dialog id="stock-dialog" class="dialog asset-dialog">
+      <div class="asset-dialog-content">
+        <div class="dialog-heading"><h2>添加自选</h2><button type="button" class="close-button" data-dialog-dismiss aria-label="关闭">×</button></div>
+        <div class="search-controls">
+          <label class="market-filter">搜索范围<select id="asset-market"><option value="all">证券（A股/港股/美股）</option><option value="CN">仅 A 股</option><option value="HK">仅港股</option><option value="US">仅美股</option></select></label>
+          <div class="asset-search-field"><span aria-hidden="true">⌕</span><input id="asset-search" type="search" autocomplete="off" placeholder="搜索股票、ETF 的代码、名称或拼音" aria-label="搜索证券" /><button type="button" id="clear-asset-search" aria-label="清除搜索" hidden>×</button></div>
+        </div>
+        <p id="asset-search-status" class="asset-search-status">输入名称、拼音或代码搜索股票和 ETF</p>
+        <div class="asset-results" role="region" aria-label="搜索结果">
+          <div class="asset-results-head"><span>代码</span><span>名称</span><span>市场</span><span>操作</span></div>
+          <div id="asset-results-list" class="asset-results-list" role="list"></div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="settings-dialog" class="dialog settings-dialog">
+      <form method="dialog" id="settings-form">
+        <div class="dialog-heading"><h2>设置</h2><button type="button" class="close-button" data-dialog-dismiss aria-label="关闭">×</button></div>
+        <div class="settings-scroll">
+          <fieldset class="settings-section"><legend>数据提供商</legend>
+            <label class="settings-row"><span class="settings-row-label">股票行情源</span><span class="settings-row-control"><select id="stock-provider"><option value="tencent">腾讯财经</option></select><small>覆盖 A 股、港股和美股公开报价。</small></span></label>
+            <label class="settings-row"><span class="settings-row-label">加密货币行情源</span><span class="settings-row-control"><select disabled><option>未启用</option></select><small>当前版本尚不支持加密货币自选。</small></span></label>
+          </fieldset>
+          <fieldset class="settings-section"><legend>表格显示</legend>
+            <div class="settings-row"><span class="settings-row-label">颜色模式</span><div class="color-mode-group" role="radiogroup" aria-label="颜色模式">
+              <label class="color-choice"><input type="radio" name="color-mode" value="china" /><span><strong>红涨绿跌</strong><small>亚洲市场配色</small></span></label>
+              <label class="color-choice"><input type="radio" name="color-mode" value="europe" /><span><strong>绿涨红跌</strong><small>西方市场配色</small></span></label>
+              <label class="color-choice"><input type="radio" name="color-mode" value="red-white" /><span><strong>红涨白跌</strong><small>暗红上涨，白色下跌</small></span></label>
+              <label class="color-choice"><input type="radio" name="color-mode" value="monochrome" /><span><strong>无颜色编码</strong><small>统一文字颜色</small></span></label>
+            </div></div>
+            <div class="settings-row"><span class="settings-row-label">名称格式</span><div class="settings-row-control"><label class="check-setting"><input id="name-pinyin" type="checkbox" /> 将中文名称转换为拼音</label><small>示例：平安银行 -> ping an yin hang</small></div></div>
+            <div class="settings-row"><span class="settings-row-label">可见列</span><div id="visible-columns" class="column-setting-grid"></div></div>
+          </fieldset>
+          <fieldset class="settings-section"><legend>行为</legend>
+            <label class="settings-row"><span class="settings-row-label">自动刷新</span><span class="settings-row-control"><select id="refresh-interval"><option value="0">关闭</option><option value="10">每 10 秒</option><option value="15">每 15 秒</option><option value="30">每 30 秒</option><option value="60">每分钟</option></select></span></label>
+            <label class="settings-row"><span class="settings-row-label">启动</span><span class="settings-row-control"><span class="check-setting"><input id="auto-start" type="checkbox" /> 开机时自动启动 Stocker</span><small id="auto-start-error" class="setting-error" hidden></small></span></label>
+            <div class="settings-row"><span class="settings-row-label">全局快捷键</span><span class="settings-row-control"><span class="shortcut-setting"><input id="global-shortcut" type="text" readonly aria-label="全局快捷键" /><button id="reset-global-shortcut" type="button" class="secondary" title="恢复默认快捷键">恢复默认</button></span><small>按下组合键可显示或最小化主窗口。</small><small id="global-shortcut-error" class="setting-error" hidden></small></span></div>
+            <label class="settings-row"><span class="settings-row-label">窗口外观</span><span class="settings-row-control"><span class="check-setting"><input id="hide-window-frame" type="checkbox" /> 隐藏系统窗框</span><small>隐藏后使用应用内的最小化、最大化和关闭按钮。</small><small id="window-frame-error" class="setting-error" hidden></small></span></label>
+            <label class="settings-row"><span class="settings-row-label">最小化行为</span><span class="settings-row-control"><span class="check-setting"><input id="minimize-to-tray" type="checkbox" /> 最小化时收进托盘</span></span></label>
+          </fieldset>
+        </div>
+        <div class="dialog-actions"><button type="button" class="secondary" data-dialog-dismiss>取消</button><button value="default" class="primary">保存</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="manage-dialog" class="dialog manage-dialog">
+      <div class="manage-dialog-content">
+        <div class="dialog-heading"><h2>编辑自选</h2><button type="button" class="close-button" data-dialog-dismiss aria-label="关闭">×</button></div>
+        <nav class="manage-market-tabs" aria-label="编辑市场筛选">
+          <button class="active" data-manage-market="all">全部</button>
+          <button data-manage-market="CN">A股</button>
+          <button data-manage-market="HK">港股</button>
+          <button data-manage-market="US">美股</button>
+        </nav>
+        <div class="manage-actions" aria-label="调整自选顺序">
+          <span>自选列表</span>
+          <button type="button" id="move-watchlist-up" title="上移" aria-label="上移">↑</button>
+          <button type="button" id="move-watchlist-down" title="下移" aria-label="下移">↓</button>
+        </div>
+        <div class="manage-table" role="region" aria-label="自选列表管理">
+          <div class="manage-table-head"><span>代码</span><span>原始名称</span><span>自定义名称</span><span>成本价</span><span>持仓</span><span></span></div>
+          <div id="manage-watchlist" class="manage-watchlist" role="list"></div>
+        </div>
+        <div class="dialog-actions"><button type="button" class="secondary" data-dialog-dismiss>取消</button><button type="button" class="primary" data-dialog-dismiss>完成</button></div>
+      </div>
+    </dialog>
+
+    <dialog id="instrument-dialog" class="dialog instrument-dialog">
+      <form method="dialog" id="instrument-form">
+        <div class="dialog-heading"><h2 id="instrument-title">编辑自选</h2><button type="button" class="close-button" data-dialog-dismiss aria-label="关闭">×</button></div>
+        <p id="instrument-original-name" class="instrument-original-name"></p>
+        <label>自定义名称<input id="instrument-label" autocomplete="off" placeholder="留空则显示原始名称" /></label>
+        <label>成本价<input id="instrument-cost" type="number" min="0" step="any" inputmode="decimal" placeholder="可选" /></label>
+        <label>持仓<input id="instrument-holdings" type="number" min="0" step="any" inputmode="decimal" placeholder="可选" /></label>
+        <div class="dialog-actions"><button type="button" class="secondary" data-dialog-dismiss>取消</button><button value="default" class="primary">保存</button></div>
+      </form>
+    </dialog>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

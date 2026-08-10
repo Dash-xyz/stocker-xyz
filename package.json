@@ -1,0 +1,14 @@
+{
+  "name": "stocker",
+  "version": "0.1.0",
+  "description": "A fast, cross-platform watchlist desktop app.",
+  "scripts": {
+    "start": "tauri dev",
+    "dev": "tauri dev",
+    "package": "tauri build --debug",
+    "dist": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.8.3"
+  }
+}
