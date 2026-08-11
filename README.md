@@ -1,5 +1,13 @@
 # Stocker
 
+## Screenshots
+
+![Stocker main watchlist](raw/demo1.png)
+
+![Stocker stock search](raw/demo2.png)
+
+![Stocker settings](raw/demo3.png)
+
 一个面向 Windows 与 macOS 的轻量桌面自选股工具，使用 Tauri 2 构建。
 
 ## 特性
