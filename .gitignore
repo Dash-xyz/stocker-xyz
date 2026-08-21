@@ -1,2 +1,26 @@
-node_modules
-debug
+# Dependencies
+/node_modules/
+
+# Rust and Tauri generated output
+/src-tauri/target/
+/src-tauri/target-manage/
+/src-tauri/gen/schemas/
+
+# Local environment and logs
+.env
+.env.*
+!.env.example
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE and operating-system files
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+*.bak
