@@ -13,6 +13,7 @@
         <h1>Stocker</h1>
         <nav class="market-tabs" aria-label="市场筛选">
           <button class="active" data-market="all">全部</button>
+          <button data-market="position">持仓</button>
           <button data-market="CN">A股</button>
           <button data-market="HK">港股</button>
           <button data-market="US">美股</button>
@@ -40,12 +41,18 @@
         <div id="empty-state" class="empty-state" hidden>没有匹配的自选股</div>
       </section>
 
-      <footer class="market-summary" id="market-summary">
+    <section id="watch-alert-panel" class="watch-alert-panel" aria-label="Watch alerts" hidden>
+      <div class="watch-alert-panel-heading"><strong>盯盘提醒</strong><button id="clear-watch-alerts" type="button" title="清除当前提醒" aria-label="清除当前提醒">×</button></div>
+      <div id="watch-alert-list" class="watch-alert-list" role="list"></div>
+    </section>
+
+    <footer class="market-summary" id="market-summary">
         <div class="summary-label"><span class="status-dot"></span><select id="market-index" aria-label="市场指数"></select></div>
         <strong id="summary-price">--</strong>
         <strong id="summary-change">--</strong>
         <strong id="summary-percent">--</strong>
-      </footer>
+    </footer>
+    <div id="watch-alert-toast" class="watch-alert-toast" role="status" aria-live="polite" hidden></div>
     </main>
 
     <dialog id="stock-dialog" class="dialog asset-dialog">
@@ -72,6 +79,7 @@
             <label class="settings-row"><span class="settings-row-label">加密货币行情源</span><span class="settings-row-control"><select disabled><option>未启用</option></select><small>当前版本尚不支持加密货币自选。</small></span></label>
           </fieldset>
           <fieldset class="settings-section"><legend>表格显示</legend>
+            <label class="settings-row"><span class="settings-row-label">界面主题</span><span class="settings-row-control"><select id="app-theme"><option value="dark">黑色主题</option><option value="light">白色主题</option></select><small>切换应用整体明暗外观。</small></span></label>
             <div class="settings-row"><span class="settings-row-label">颜色模式</span><div class="color-mode-group" role="radiogroup" aria-label="颜色模式">
               <label class="color-choice"><input type="radio" name="color-mode" value="china" /><span><strong>红涨绿跌</strong><small>亚洲市场配色</small></span></label>
               <label class="color-choice"><input type="radio" name="color-mode" value="europe" /><span><strong>绿涨红跌</strong><small>西方市场配色</small></span></label>
@@ -80,6 +88,12 @@
             </div></div>
             <div class="settings-row"><span class="settings-row-label">名称格式</span><div class="settings-row-control"><label class="check-setting"><input id="name-pinyin" type="checkbox" /> 将中文名称转换为拼音</label><small>示例：平安银行 -> ping an yin hang</small></div></div>
             <div class="settings-row"><span class="settings-row-label">可见列</span><div id="visible-columns" class="column-setting-grid"></div></div>
+          </fieldset>
+          <fieldset class="settings-section"><legend>盯盘提醒</legend>
+            <div class="settings-row"><span class="settings-row-label">触发规则</span><span class="settings-row-control"><small>按涨跌幅百分比提醒：填写 3 表示涨幅或跌幅达到 3%。价格回到阈值内后，再次越过阈值才会重复提醒。</small></span></div>
+            <label class="settings-row"><span class="settings-row-label">个股涨跌幅阈值</span><span class="settings-row-control threshold-control"><span><input id="watch-threshold-stock" type="number" min="0" max="1000" step="0.01" inputmode="decimal" placeholder="关闭" /><b>%</b></span><small>适用于股票；可在单个标的编辑页覆盖。</small></span></label>
+            <label class="settings-row"><span class="settings-row-label">ETF / 基金涨跌幅阈值</span><span class="settings-row-control threshold-control"><span><input id="watch-threshold-etf" type="number" min="0" max="1000" step="0.01" inputmode="decimal" placeholder="关闭" /><b>%</b></span><small>适用于 ETF、LOF 和基金；可在单个标的编辑页覆盖。</small></span></label>
+            <label class="settings-row"><span class="settings-row-label">指数涨跌幅阈值</span><span class="settings-row-control threshold-control"><span><input id="watch-threshold-index" type="number" min="0" max="1000" step="0.01" inputmode="decimal" placeholder="关闭" /><b>%</b></span><small>适用于全部市场指数。</small></span></label>
           </fieldset>
           <fieldset class="settings-section"><legend>行为</legend>
             <label class="settings-row"><span class="settings-row-label">自动刷新</span><span class="settings-row-control"><select id="refresh-interval"><option value="0">关闭</option><option value="10">每 10 秒</option><option value="15">每 15 秒</option><option value="30">每 30 秒</option><option value="60">每分钟</option></select></span></label>
@@ -120,8 +134,10 @@
         <div class="dialog-heading"><h2 id="instrument-title">编辑自选</h2><button type="button" class="close-button" data-dialog-dismiss aria-label="关闭">×</button></div>
         <p id="instrument-original-name" class="instrument-original-name"></p>
         <label>自定义名称<input id="instrument-label" autocomplete="off" placeholder="留空则显示原始名称" /></label>
-        <label>成本价<input id="instrument-cost" type="number" min="0" step="any" inputmode="decimal" placeholder="可选" /></label>
+        <label>买入价<input id="instrument-cost" type="number" min="0" step="any" inputmode="decimal" placeholder="可选" /></label>
         <label>持仓<input id="instrument-holdings" type="number" min="0" step="any" inputmode="decimal" placeholder="可选" /></label>
+        <label>涨跌幅阈值（%）<input id="instrument-alert-threshold" type="number" min="0" max="1000" step="0.01" inputmode="decimal" placeholder="留空则使用类别阈值" /></label>
+        <p class="dialog-note">当前类别：<span id="instrument-alert-category"></span>。填写 3 表示涨跌幅达到 3% 时显示系统通知。</p>
         <div class="dialog-actions"><button type="button" class="secondary" data-dialog-dismiss>取消</button><button value="default" class="primary">保存</button></div>
       </form>
     </dialog>

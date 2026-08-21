@@ -10,8 +10,8 @@ const DEFAULT_WATCHLIST = [
 ];
 const CURRENCY = { CN: 'CNY', HK: 'HKD', US: 'USD' };
 const DEFAULT_SETTINGS = {
-  interval: 15, minimizeToTray: true, autoStart: false, hideWindowFrame: false, globalShortcut: 'Ctrl+Space', quoteProvider: 'tencent', colorMode: 'monochrome', namePinyin: false,
-  visibleColumns: ['name', 'price', 'percent', 'profitPercent'], marketIndex: 'sh000001'
+  interval: 15, minimizeToTray: true, autoStart: false, hideWindowFrame: false, globalShortcut: 'Ctrl+Space', quoteProvider: 'tencent', theme: 'dark', colorMode: 'monochrome', namePinyin: false,
+  visibleColumns: ['name', 'price', 'percent', 'profitPercent'], marketIndex: 'sh000001', watchThresholds: { stock: 0, etf: 0, index: 0 }
 };
 const MARKET_INDEX_DEFS = [
   { group: '中国大陆', symbol: 'sh000001', label: '上证指数' },
@@ -37,32 +37,83 @@ const COLUMN_DEFS = [
   { id: 'cost', label: '成本', width: '88px' }, { id: 'holdings', label: '持仓', width: '88px' },
   { id: 'profit', label: '净收益额', width: '104px' }, { id: 'profitPercent', label: '持仓盈亏%', width: '100px' }
 ];
-const INDEX_COLUMN_IDS = ['name', 'price', 'change', 'percent'];
+const INDEX_COLUMN_IDS = ['name', 'price', 'change', 'percent', 'cost', 'holdings', 'profit', 'profitPercent'];
 const $ = (selector) => document.querySelector(selector);
-const storedSort = readStorage('stocker:sort', { field: 'manual', descending: false });
-const initialSort = storedSort.field === 'manual' || COLUMN_DEFS.some((column) => column.id === storedSort.field) ? storedSort.field : 'manual';
+const MARKET_TAB_IDS = ['all', 'position', 'CN', 'HK', 'US', 'index'];
+const legacyStoredSort = readStorage('stocker:sort', { field: 'manual', descending: false });
+const storedSorts = readStorage('stocker:sort-by-market', {});
+function normalizeSort(sort, market) {
+  const field = sort?.field;
+  const allowedColumns = market === 'index' ? INDEX_COLUMN_IDS : COLUMN_DEFS.map((column) => column.id);
+  const normalizedField = field === 'manual' || allowedColumns.includes(field) ? field : 'manual';
+  return {
+    field: normalizedField,
+    descending: normalizedField === 'manual' ? false : Boolean(sort?.descending)
+  };
+}
+const initialSorts = Object.fromEntries(MARKET_TAB_IDS.map((market) => [market, normalizeSort(storedSorts[market] || legacyStoredSort, market)]));
 let state = {
   watchlist: readStorage('stocker:watchlist', DEFAULT_WATCHLIST),
   settings: { ...DEFAULT_SETTINGS, ...readStorage('stocker:settings', {}) },
   quotes: readStorage('stocker:quotes', {}),
   lastUpdatedAt: Number(readStorage('stocker:last-updated-at', 0)) || 0,
-  market: 'all', sort: initialSort, descending: initialSort === 'manual' ? false : Boolean(storedSort.descending), selected: null, timer: null,
+  market: 'all', sortByMarket: initialSorts, selected: null, timer: null,
   search: { request: 0, results: [], timer: null },
-  manageMarket: 'all', manageSelected: null, editingSymbol: null
+  manageMarket: 'all', manageSelected: null, editingSymbol: null, editingKind: null
 };
+const WATCH_ALERT_STATE_KEY = 'stocker:watch-alert-state';
+const WATCH_ALERT_NOTICE_KEY = 'stocker:watch-alert-notices';
+const activeWatchAlerts = new Set();
+let watchAlertStates = readStorage(WATCH_ALERT_STATE_KEY, {});
+if (!watchAlertStates || typeof watchAlertStates !== 'object' || Array.isArray(watchAlertStates)) watchAlertStates = {};
+let watchAlertNotices = normalizeWatchAlertNotices(readStorage(WATCH_ALERT_NOTICE_KEY, []));
 const legacyDefaultColumns = ['name', 'price', 'percent'];
 if (!Array.isArray(state.settings.visibleColumns) || state.settings.visibleColumns.join('|') === legacyDefaultColumns.join('|')) {
   state.settings.visibleColumns = [...DEFAULT_SETTINGS.visibleColumns];
   saveStorage('stocker:settings', state.settings);
 }
 state.settings.columnOrder = normalizeColumnOrder(state.settings.columnOrder);
+state.settings.marketTabOrder = normalizeMarketTabOrder(state.settings.marketTabOrder);
+state.settings.theme = state.settings.theme === 'light' ? 'light' : 'dark';
+state.settings.indexOverrides = normalizeIndexOverrides(state.settings.indexOverrides);
 
 function readStorage(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } }
 function saveStorage(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
+function normalizeWatchAlertNotices(notices) {
+  if (!Array.isArray(notices)) return [];
+  return notices
+    .filter((notice) => notice && typeof notice === 'object' && typeof notice.symbol === 'string' && typeof notice.name === 'string')
+    .map((notice) => ({
+      symbol: notice.symbol,
+      market: typeof notice.market === 'string' ? notice.market : 'CN',
+      name: notice.name,
+      percent: Number(notice.percent),
+      threshold: Number(notice.threshold),
+      triggeredAt: Number(notice.triggeredAt) || Date.now()
+    }))
+    .filter((notice) => Number.isFinite(notice.percent) && Number.isFinite(notice.threshold))
+    .slice(0, 20);
+}
 function normalizeColumnOrder(order) {
   const known = new Set(COLUMN_DEFS.map((column) => column.id));
   const ordered = Array.isArray(order) ? order.filter((id, index) => known.has(id) && order.indexOf(id) === index) : [];
   return [...ordered, ...COLUMN_DEFS.map((column) => column.id).filter((id) => !ordered.includes(id))];
+}
+function normalizeMarketTabOrder(order) {
+  const ordered = Array.isArray(order) ? order.filter((market, index) => MARKET_TAB_IDS.includes(market) && order.indexOf(market) === index) : [];
+  if (!ordered.includes('position') && ordered.includes('CN')) ordered.splice(ordered.indexOf('CN'), 0, 'position');
+  return [...ordered, ...MARKET_TAB_IDS.filter((market) => !ordered.includes(market))];
+}
+function normalizeIndexOverrides(overrides) {
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) return {};
+  return Object.fromEntries(Object.entries(overrides)
+    .filter(([symbol, config]) => MARKET_INDEX_DEFS.some((index) => index.symbol === symbol) && config && typeof config === 'object')
+    .map(([symbol, config]) => [symbol, {
+      label: typeof config.label === 'string' ? config.label : '',
+      costPrice: Number.isFinite(config.costPrice) ? config.costPrice : null,
+      holdings: Number.isFinite(config.holdings) ? config.holdings : null,
+      alertThreshold: Number.isFinite(config.alertThreshold) ? config.alertThreshold : null
+    }]));
 }
 function normalizeSymbol(value, market) {
   const code = value.trim().toUpperCase().replace(/\s/g, '');
@@ -84,7 +135,8 @@ function displayName(item, quote = state.quotes[item.symbol] || {}) { return ite
 function originalName(item, quote = state.quotes[item.symbol] || {}) { return quote.name || item.originalName || item.label || cleanName(item.symbol); }
 function savedNumber(value) { return Number.isFinite(value) ? value.toLocaleString('en-US', { maximumFractionDigits: 4 }) : '—'; }
 function saveWatchlist() { saveStorage('stocker:watchlist', state.watchlist); }
-function saveSort() { saveStorage('stocker:sort', { field: state.sort, descending: state.descending }); }
+function currentSort() { return state.sortByMarket[state.market]; }
+function saveSort() { saveStorage('stocker:sort-by-market', state.sortByMarket); }
 function visibleColumnDefs() {
   const visible = state.market === 'index' ? INDEX_COLUMN_IDS : state.settings.visibleColumns;
   const order = state.market === 'index' ? INDEX_COLUMN_IDS : state.settings.columnOrder;
@@ -94,6 +146,155 @@ function quoteGridTemplate() { return visibleColumnDefs().map((column) => column
 function formatAmount(value) { if (!Number.isFinite(value)) return '--'; if (Math.abs(value) >= 1e8) return `${(value / 1e8).toFixed(2)}亿`; if (Math.abs(value) >= 1e4) return `${(value / 1e4).toFixed(2)}万`; return value.toLocaleString('en-US', { maximumFractionDigits: 0 }); }
 function profitValue(item, quote) { return Number.isFinite(item.costPrice) && Number.isFinite(item.holdings) && Number.isFinite(quote.price) ? (quote.price - item.costPrice) * item.holdings : null; }
 function profitPercentValue(item, quote) { return Number.isFinite(item.costPrice) && item.costPrice > 0 && Number.isFinite(quote.price) ? (quote.price - item.costPrice) / item.costPrice * 100 : null; }
+function assetAlertCategory(item) {
+  if (item.market === 'INDEX') return 'index';
+  if (item.assetType === 'etf' || /(?:ETF|LOF|基金)/i.test(`${item.originalName || ''} ${item.label || ''}`)) return 'etf';
+  return 'stock';
+}
+function indexItem(index) {
+  const overrides = state.settings.indexOverrides[index.symbol] || {};
+  return {
+    symbol: index.symbol,
+    market: 'INDEX',
+    originalName: index.label,
+    label: overrides.label || '',
+    costPrice: Number.isFinite(overrides.costPrice) ? overrides.costPrice : null,
+    holdings: Number.isFinite(overrides.holdings) ? overrides.holdings : null,
+    alertThreshold: Number.isFinite(overrides.alertThreshold) ? overrides.alertThreshold : null
+  };
+}
+function alertThresholdFor(item) {
+  const override = Number(item.alertThreshold);
+  if (Number.isFinite(override) && override > 0) return override;
+  return Math.max(0, Number(state.settings.watchThresholds?.[assetAlertCategory(item)]) || 0);
+}
+function alertThresholdKey(threshold) { return (Math.round(Number(threshold) * 1e6) / 1e6).toFixed(6); }
+function alertCategoryName(item) { return { stock: '个股', etf: 'ETF/基金', index: '指数' }[assetAlertCategory(item)]; }
+function saveWatchAlertStates() { saveStorage(WATCH_ALERT_STATE_KEY, watchAlertStates); }
+function saveWatchAlertNotices() { saveStorage(WATCH_ALERT_NOTICE_KEY, watchAlertNotices); }
+function alertDirection(percent) { return percent > 0 ? '上涨' : percent < 0 ? '下跌' : '波动'; }
+function watchAlertNoticeFor(item, quote, threshold) {
+  return {
+    symbol: item.symbol,
+    market: item.market,
+    name: displayName(item, quote),
+    percent: Number(quote.percent),
+    threshold,
+    triggeredAt: Date.now()
+  };
+}
+function renderWatchAlertPanel() {
+  const panel = $('#watch-alert-panel');
+  const list = $('#watch-alert-list');
+  panel.hidden = watchAlertNotices.length === 0;
+  if (panel.hidden) {
+    list.replaceChildren();
+    return;
+  }
+  list.replaceChildren(...watchAlertNotices.map((notice) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'watch-alert-record';
+    row.setAttribute('role', 'listitem');
+    row.title = `查看 ${notice.name}`;
+    const name = document.createElement('span');
+    name.className = 'watch-alert-name';
+    name.textContent = notice.name;
+    const market = document.createElement('span');
+    market.className = 'watch-alert-market';
+    market.textContent = marketName(notice.market);
+    const detail = document.createElement('span');
+    detail.className = `watch-alert-detail ${colorClass(notice.percent)}`;
+    detail.textContent = `${alertDirection(notice.percent)} ${formatSigned(notice.percent, '%')} | 阈值 ${notice.threshold}% | ${formatUpdateTime(notice.triggeredAt)}`;
+    row.append(name, market, detail);
+    row.addEventListener('click', () => {
+      state.selected = notice.symbol;
+      setMarket(notice.market === 'INDEX' ? 'index' : notice.market);
+      if (notice.market === 'INDEX') state.settings.marketIndex = notice.symbol;
+      render();
+    });
+    return row;
+  }));
+}
+function addWatchAlertNotice(item, quote, threshold) {
+  watchAlertNotices = [watchAlertNoticeFor(item, quote, threshold), ...watchAlertNotices.filter((notice) => notice.symbol !== item.symbol)].slice(0, 20);
+  saveWatchAlertNotices();
+  renderWatchAlertPanel();
+}
+function clearWatchAlertNotice(symbol) {
+  const remaining = watchAlertNotices.filter((notice) => notice.symbol !== symbol);
+  if (remaining.length === watchAlertNotices.length) return;
+  watchAlertNotices = remaining;
+  saveWatchAlertNotices();
+  renderWatchAlertPanel();
+}
+function clearWatchAlertState(symbol, clearBackend = true) {
+  activeWatchAlerts.delete(symbol);
+  clearWatchAlertNotice(symbol);
+  if (Object.hasOwn(watchAlertStates, symbol)) {
+    delete watchAlertStates[symbol];
+    saveWatchAlertStates();
+  }
+  if (clearBackend) window.__TAURI__.core.invoke('clear_watch_alert_breach', { symbol }).catch(console.error);
+}
+let alertToastTimer = null;
+function showWatchAlertToast(title, body) {
+  const toast = $('#watch-alert-toast');
+  toast.textContent = `${title}：${body}`;
+  toast.hidden = false;
+  clearTimeout(alertToastTimer);
+  alertToastTimer = setTimeout(() => { toast.hidden = true; }, 7000);
+}
+async function evaluateWatchAlerts(quotes) {
+  const items = [...state.watchlist, ...MARKET_INDEX_DEFS.map(indexItem)];
+  const itemsBySymbol = new Map(items.map((item) => [item.symbol, item]));
+  let newAlert = false;
+  for (const quote of quotes) {
+    const item = itemsBySymbol.get(quote.symbol);
+    if (!item) continue;
+    const threshold = alertThresholdFor(item);
+    const percent = Number(quote.percent);
+    // A malformed/stale quote must not reset an active breach and cause a duplicate alert later.
+    if (!Number.isFinite(percent)) continue;
+    const priorState = watchAlertStates[item.symbol];
+    const thresholdKey = alertThresholdKey(threshold);
+    const alreadyAlerted = priorState?.breached === true
+      && (priorState.thresholdKey === thresholdKey || alertThresholdKey(priorState.threshold) === thresholdKey);
+    const isBreached = threshold > 0 && Math.abs(percent) >= threshold;
+    let isNewBreach;
+    try {
+      isNewBreach = await window.__TAURI__.core.invoke('evaluate_watch_alert_breach', {
+        symbol: item.symbol, thresholdKey, isBreached, alreadyAlerted
+      });
+    } catch (error) {
+      console.error(error);
+      isNewBreach = isBreached && !alreadyAlerted;
+    }
+    if (!isBreached) {
+      activeWatchAlerts.delete(item.symbol);
+      if (Object.hasOwn(watchAlertStates, item.symbol)) {
+        delete watchAlertStates[item.symbol];
+        saveWatchAlertStates();
+      }
+      continue;
+    }
+    activeWatchAlerts.add(item.symbol);
+    if (!alreadyAlerted) {
+      watchAlertStates[item.symbol] = { breached: true, thresholdKey };
+      saveWatchAlertStates();
+    }
+    if (!isNewBreach) continue;
+    newAlert = true;
+    const direction = alertDirection(percent);
+    addWatchAlertNotice(item, quote, threshold);
+    window.__TAURI__.core.invoke('show_watch_alert', {
+      title: `盯盘提醒 · ${alertCategoryName(item)}`,
+      body: `${displayName(item, quote)} ${direction} ${formatSigned(percent, '%')}，已达到 ${threshold}% 阈值`
+    }).catch((error) => { console.error(error); showWatchAlertToast('盯盘提醒', `${displayName(item, quote)} ${direction} ${formatSigned(percent, '%')}，已达到 ${threshold}%`); });
+    showWatchAlertToast('盯盘提醒', `${displayName(item, quote)} ${direction} ${formatSigned(percent, '%')}，已达到 ${threshold}%`);
+  }
+  syncTrayAlertState(newAlert);
+}
 function sortValue(item, column) {
   const quote = state.quotes[item.symbol] || {};
   if (column === 'code') return cleanName(item.symbol);
@@ -107,20 +308,26 @@ function sortValue(item, column) {
 }
 
 function currentItems() {
-  const items = state.market === 'index'
-    ? MARKET_INDEX_DEFS.map((index) => ({ symbol: index.symbol, market: 'INDEX', originalName: index.label, label: '' }))
-    : state.watchlist.filter((item) => state.market === 'all' || item.market === state.market);
-  if (state.sort === 'manual') return items;
+  let items;
+  if (state.market === 'index') {
+    items = MARKET_INDEX_DEFS.map(indexItem);
+  } else if (state.market === 'position') {
+    items = [...state.watchlist, ...MARKET_INDEX_DEFS.map(indexItem)].filter((item) => Number.isFinite(item.costPrice));
+  } else {
+    items = state.watchlist.filter((item) => state.market === 'all' || item.market === state.market);
+  }
+  const sort = currentSort();
+  if (sort.field === 'manual') return items;
   return items.sort((a, b) => {
-    const one = sortValue(a, state.sort);
-    const two = sortValue(b, state.sort);
+    const one = sortValue(a, sort.field);
+    const two = sortValue(b, sort.field);
     const oneMissing = one == null || (typeof one === 'number' && !Number.isFinite(one));
     const twoMissing = two == null || (typeof two === 'number' && !Number.isFinite(two));
     if (oneMissing || twoMissing) return oneMissing === twoMissing ? 0 : oneMissing ? 1 : -1;
     if (typeof one === 'string' || typeof two === 'string') {
-      return (state.descending ? -1 : 1) * String(one).localeCompare(String(two), 'zh-CN');
+      return (sort.descending ? -1 : 1) * String(one).localeCompare(String(two), 'zh-CN');
     }
-    return (state.descending ? -1 : 1) * (one - two);
+    return (sort.descending ? -1 : 1) * (one - two);
   });
 }
 let ignoreHeaderClick = false;
@@ -162,20 +369,21 @@ function updateHeaderDragTarget(event) {
 function renderQuoteHead() {
   const head = $('#quote-head');
   const columns = visibleColumnDefs();
+  const sort = currentSort();
   head.style.gridTemplateColumns = quoteGridTemplate();
   head.replaceChildren(...columns.map((column) => {
     const cell = document.createElement('button');
     cell.type = 'button';
     cell.dataset.column = column.id;
-    cell.className = `sort-head${state.sort === column.id ? ' active' : ''}${state.sort === column.id && state.descending ? ' desc' : ''}`;
-    cell.setAttribute('aria-sort', state.sort === column.id ? (state.descending ? 'descending' : 'ascending') : 'none');
+    cell.className = `sort-head${sort.field === column.id ? ' active' : ''}${sort.field === column.id && sort.descending ? ' desc' : ''}`;
+    cell.setAttribute('aria-sort', sort.field === column.id ? (sort.descending ? 'descending' : 'ascending') : 'none');
     const label = document.createElement('span');
     label.textContent = column.label;
     cell.append(label);
     cell.addEventListener('click', () => {
       if (ignoreHeaderClick) return;
-      state.descending = state.sort === column.id ? !state.descending : false;
-      state.sort = column.id;
+      sort.descending = sort.field === column.id ? !sort.descending : false;
+      sort.field = column.id;
       saveSort();
       render();
     });
@@ -254,14 +462,16 @@ function render() {
     row.className = `quote-row${state.selected === item.symbol ? ' selected' : ''}`;
     row.style.gridTemplateColumns = gridTemplate;
     row.setAttribute('role', 'listitem');
-    row.title = isIndexView ? '指数当日行情' : '双击编辑，右键删除';
+    row.title = item.market === 'INDEX' ? '双击编辑指数设置' : '双击编辑，右键删除';
     visibleColumnDefs().forEach((column) => appendQuoteCell(row, column, item, quote));
     row.addEventListener('click', () => {
       state.selected = item.symbol;
       if (isIndexView) { state.settings.marketIndex = item.symbol; saveStorage('stocker:settings', state.settings); }
       render();
     });
-    if (!isIndexView) {
+    if (item.market === 'INDEX') {
+      row.addEventListener('dblclick', () => openInstrumentEditor(item.symbol, 'index'));
+    } else {
       row.addEventListener('dblclick', () => openInstrumentEditor(item.symbol));
       row.addEventListener('contextmenu', (event) => { event.preventDefault(); if (confirm(`删除 ${displayName(item, quote)}？`)) removeStock(item.symbol); });
     }
@@ -299,7 +509,8 @@ function renderSummary() {
   $('#summary-percent').textContent = formatSigned(quote.percent, '%');
   ['summary-change', 'summary-percent'].forEach((id) => { const target = $(`#${id}`); target.className = colorClass(quote.percent); });
 }
-async function refreshQuotes() {
+let refreshPromise = null;
+async function performQuoteRefresh() {
   const symbols = [...new Set([...state.watchlist.map((item) => item.symbol), ...MARKET_INDEX_DEFS.map((index) => index.symbol)])];
   if (!symbols.length) return;
   $('#refresh-button').classList.add('spinning');
@@ -308,6 +519,7 @@ async function refreshQuotes() {
   try {
     const result = await window.__TAURI__.core.invoke('fetch_quotes', { symbols });
     result.quotes.forEach((quote) => { state.quotes[quote.symbol] = quote; });
+    await evaluateWatchAlerts(result.quotes);
     saveStorage('stocker:quotes', state.quotes);
     state.lastUpdatedAt = Number(result.fetchedAt) || Date.now();
     saveStorage('stocker:last-updated-at', state.lastUpdatedAt);
@@ -319,6 +531,11 @@ async function refreshQuotes() {
     console.error(error);
   } finally { $('#refresh-button').classList.remove('spinning'); }
 }
+function refreshQuotes() {
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = performQuoteRefresh().finally(() => { refreshPromise = null; });
+  return refreshPromise;
+}
 function scheduleRefresh() {
   clearInterval(state.timer);
   if (state.settings.interval > 0) state.timer = setInterval(refreshQuotes, state.settings.interval * 1000);
@@ -326,10 +543,13 @@ function scheduleRefresh() {
 function syncTrayBehavior() {
   window.__TAURI__.core.invoke('set_minimize_to_tray', { enabled: Boolean(state.settings.minimizeToTray) }).catch(console.error);
 }
+function syncTrayAlertState(newAlert = false) {
+  window.__TAURI__.core.invoke('set_tray_alert_active', { active: activeWatchAlerts.size > 0, newAlert }).catch(console.error);
+}
 function setAutoStart(enabled) { return window.__TAURI__.core.invoke('set_auto_start', { enabled }); }
 function setGlobalShortcut(shortcut) { return window.__TAURI__.core.invoke('set_global_shortcut', { shortcut }); }
 function setWindowDecorations(decorations) { return window.__TAURI__.core.invoke('set_window_decorations', { decorations }); }
-function applyDisplaySettings() { document.documentElement.dataset.colorMode = state.settings.colorMode; document.documentElement.dataset.windowFrame = state.settings.hideWindowFrame ? 'frameless' : 'system'; }
+function applyDisplaySettings() { document.documentElement.dataset.theme = state.settings.theme; document.documentElement.dataset.colorMode = state.settings.colorMode; document.documentElement.dataset.windowFrame = state.settings.hideWindowFrame ? 'frameless' : 'system'; }
 function renderVisibleColumnSettings() {
   const container = $('#visible-columns');
   container.replaceChildren(...COLUMN_DEFS.map((column) => {
@@ -350,8 +570,12 @@ function openSettingsDialog() {
   $('#global-shortcut-error').hidden = true;
   $('#window-frame-error').hidden = true;
   $('#stock-provider').value = state.settings.quoteProvider;
+  $('#app-theme').value = state.settings.theme;
   document.querySelector(`input[name="color-mode"][value="${state.settings.colorMode}"]`).checked = true;
   $('#name-pinyin').checked = Boolean(state.settings.namePinyin);
+  ['stock', 'etf', 'index'].forEach((category) => {
+    $(`#watch-threshold-${category}`).value = Number(state.settings.watchThresholds?.[category]) || '';
+  });
   renderVisibleColumnSettings();
   if (!$('#settings-dialog').open) $('#settings-dialog').showModal();
 }
@@ -377,7 +601,7 @@ function renderAssetResults() {
 }
 function addAsset(asset) {
   if (state.watchlist.some((item) => item.symbol === asset.symbol)) return;
-  state.watchlist.push({ symbol: asset.symbol, market: asset.market, originalName: asset.name, label: '', costPrice: null, holdings: null });
+  state.watchlist.push({ symbol: asset.symbol, market: asset.market, originalName: asset.name, assetType: asset.assetType || 'stock', label: '', costPrice: null, holdings: null, alertThreshold: null });
   state.selected = asset.symbol;
   saveWatchlist();
   render();
@@ -467,20 +691,27 @@ function openManageDialog() {
   renderManage();
   $('#manage-dialog').showModal();
 }
-function openInstrumentEditor(symbol) {
-  const item = state.watchlist.find((entry) => entry.symbol === symbol);
+function openInstrumentEditor(symbol, kind = 'watchlist') {
+  const item = kind === 'index'
+    ? MARKET_INDEX_DEFS.find((index) => index.symbol === symbol) && indexItem(MARKET_INDEX_DEFS.find((index) => index.symbol === symbol))
+    : state.watchlist.find((entry) => entry.symbol === symbol);
   if (!item) return;
   state.editingSymbol = symbol;
-  $('#instrument-title').textContent = `编辑 ${cleanName(item.symbol)}`;
+  state.editingKind = kind;
+  $('#instrument-title').textContent = `${kind === 'index' ? '编辑指数' : '编辑自选'} ${cleanName(item.symbol)}`;
   $('#instrument-original-name').textContent = originalName(item);
   $('#instrument-label').value = item.label || '';
   $('#instrument-cost').value = Number.isFinite(item.costPrice) ? item.costPrice : '';
   $('#instrument-holdings').value = Number.isFinite(item.holdings) ? item.holdings : '';
+  $('#instrument-alert-threshold').value = Number.isFinite(item.alertThreshold) ? item.alertThreshold : '';
+  $('#instrument-alert-category').textContent = alertCategoryName(item);
   $('#instrument-dialog').showModal();
   setTimeout(() => $('#instrument-label').focus(), 50);
 }
 function removeStock(symbol) {
   state.watchlist = state.watchlist.filter((item) => item.symbol !== symbol);
+  clearWatchAlertState(symbol);
+  syncTrayAlertState();
   if (state.selected === symbol) state.selected = null;
   if (state.manageSelected === symbol) state.manageSelected = managedItems()[0]?.symbol || null;
   saveWatchlist();
@@ -488,11 +719,117 @@ function removeStock(symbol) {
   if ($('#manage-dialog').open) renderManage();
 }
 
-document.querySelectorAll('.market-tabs button').forEach((button) => button.addEventListener('click', () => { state.market = button.dataset.market; document.querySelectorAll('.market-tabs button').forEach((tab) => tab.classList.toggle('active', tab === button)); render(); if (state.market === 'index') refreshQuotes(); }));
+let ignoreMarketTabClick = false;
+let marketTabPointerDrag = null;
+function marketTabs() { return [...document.querySelectorAll('.market-tabs button')]; }
+function applyMarketTabOrder() {
+  const nav = document.querySelector('.market-tabs');
+  const tabsByMarket = new Map(marketTabs().map((tab) => [tab.dataset.market, tab]));
+  state.settings.marketTabOrder.forEach((market) => nav.append(tabsByMarket.get(market)));
+}
+function moveMarketTab(source, target, after) {
+  if (!source || source === target) return;
+  const order = normalizeMarketTabOrder(state.settings.marketTabOrder);
+  const sourceIndex = order.indexOf(source);
+  if (sourceIndex < 0 || order.indexOf(target) < 0) return;
+  order.splice(sourceIndex, 1);
+  order.splice(order.indexOf(target) + (after ? 1 : 0), 0, source);
+  state.settings.marketTabOrder = order;
+  saveStorage('stocker:settings', state.settings);
+  ignoreMarketTabClick = true;
+  setTimeout(() => { ignoreMarketTabClick = false; }, 120);
+  applyMarketTabOrder();
+}
+function clearMarketTabDragState() {
+  marketTabPointerDrag?.ghost?.remove();
+  marketTabPointerDrag = null;
+  marketTabs().forEach((tab) => tab.classList.remove('dragging', 'drag-over', 'drop-after'));
+}
+function updateMarketTabDragTarget(event) {
+  const drag = marketTabPointerDrag;
+  if (!drag) return;
+  drag.ghost.style.transform = `translate3d(${event.clientX + 10}px, ${event.clientY + 10}px, 0)`;
+  marketTabs().forEach((tab) => tab.classList.remove('drag-over', 'drop-after'));
+  const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('.market-tabs button');
+  if (!target || target.dataset.market === drag.market) {
+    drag.target = null;
+    return;
+  }
+  const rect = target.getBoundingClientRect();
+  drag.target = target.dataset.market;
+  drag.after = event.clientX >= rect.left + rect.width / 2;
+  target.classList.add('drag-over');
+  target.classList.toggle('drop-after', drag.after);
+}
+function initializeMarketTabs() {
+  applyMarketTabOrder();
+  marketTabs().forEach((button) => {
+    button.addEventListener('click', () => { if (!ignoreMarketTabClick) setMarket(button.dataset.market); });
+    button.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      marketTabPointerDrag = { market: button.dataset.market, startX: event.clientX, startY: event.clientY, active: false, pointerId: event.pointerId, tab: button, target: null, after: false, ghost: null };
+      button.setPointerCapture(event.pointerId);
+    });
+    button.addEventListener('pointermove', (event) => {
+      if (!marketTabPointerDrag || marketTabPointerDrag.pointerId !== event.pointerId) return;
+      if (!marketTabPointerDrag.active && Math.hypot(event.clientX - marketTabPointerDrag.startX, event.clientY - marketTabPointerDrag.startY) < 6) return;
+      if (!marketTabPointerDrag.active) {
+        marketTabPointerDrag.active = true;
+        marketTabPointerDrag.tab.classList.add('dragging');
+        const ghost = marketTabPointerDrag.tab.cloneNode(true);
+        ghost.classList.add('market-tab-drag-ghost');
+        ghost.disabled = true;
+        ghost.style.width = `${marketTabPointerDrag.tab.getBoundingClientRect().width}px`;
+        document.body.append(ghost);
+        marketTabPointerDrag.ghost = ghost;
+      }
+      updateMarketTabDragTarget(event);
+    });
+    button.addEventListener('pointerup', (event) => {
+      if (!marketTabPointerDrag || marketTabPointerDrag.pointerId !== event.pointerId) return;
+      const drag = marketTabPointerDrag;
+      if (drag.active && drag.target) moveMarketTab(drag.market, drag.target, drag.after);
+      clearMarketTabDragState();
+    });
+    button.addEventListener('pointercancel', clearMarketTabDragState);
+    button.addEventListener('lostpointercapture', (event) => {
+      if (marketTabPointerDrag?.pointerId === event.pointerId) clearMarketTabDragState();
+    });
+  });
+}
+function setMarket(market) {
+  const tabs = [...document.querySelectorAll('.market-tabs button')];
+  const activeTab = tabs.find((tab) => tab.dataset.market === market);
+  if (!activeTab) return;
+  state.market = market;
+  tabs.forEach((tab) => tab.classList.toggle('active', tab === activeTab));
+  render();
+  if (state.market === 'index') refreshQuotes();
+}
+initializeMarketTabs();
+function minimizeMainWindow() {
+  return window.__TAURI__.core.invoke('minimize_main_window');
+}
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && !event.repeat && !document.querySelector('dialog[open]')) {
+    event.preventDefault();
+    minimizeMainWindow().catch(console.error);
+    return;
+  }
+  if (!event.ctrlKey || event.altKey || event.metaKey || event.shiftKey || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+  if (document.querySelector('dialog[open]') || event.target.matches('input, textarea, select, [contenteditable="true"]')) return;
+  const tabs = [...document.querySelectorAll('.market-tabs button')];
+  const currentIndex = Math.max(0, tabs.findIndex((tab) => tab.dataset.market === state.market));
+  const offset = event.key === 'ArrowLeft' ? -1 : 1;
+  const nextIndex = (currentIndex + offset + tabs.length) % tabs.length;
+  event.preventDefault();
+  setMarket(tabs[nextIndex].dataset.market);
+  tabs[nextIndex].focus();
+});
 $('#refresh-button').addEventListener('click', refreshQuotes); $('#add-button').addEventListener('click', openAssetSearch);
 $('#edit-watchlist-button').addEventListener('click', openManageDialog);
 $('#settings-button').addEventListener('click', openSettingsDialog);
-$('#window-minimize').addEventListener('click', () => window.__TAURI__.core.invoke('minimize_main_window').catch(console.error));
+$('#window-minimize').addEventListener('click', () => minimizeMainWindow().catch(console.error));
 $('#window-maximize').addEventListener('click', async () => {
   try {
     const maximized = await window.__TAURI__.core.invoke('toggle_maximize_main_window');
@@ -528,6 +865,11 @@ $('#market-index').addEventListener('change', () => {
   renderSummary();
   refreshQuotes();
 });
+$('#clear-watch-alerts').addEventListener('click', () => {
+  watchAlertNotices = [];
+  saveWatchAlertNotices();
+  renderWatchAlertPanel();
+});
 window.addEventListener('stocker:open-settings', openSettingsDialog);
 document.querySelectorAll('[data-dialog-dismiss]').forEach((button) => button.addEventListener('click', () => button.closest('dialog').close()));
 $('#asset-search').addEventListener('input', queueAssetSearch);
@@ -542,16 +884,33 @@ $('#move-watchlist-up').addEventListener('click', () => moveManagedStock(-1));
 $('#move-watchlist-down').addEventListener('click', () => moveManagedStock(1));
 $('#instrument-form').addEventListener('submit', (event) => {
   event.preventDefault();
+  const numberOrNull = (selector) => { const value = $(selector).value.trim(); return value === '' ? null : Number(value); };
+  if (state.editingKind === 'index') {
+    const index = MARKET_INDEX_DEFS.find((entry) => entry.symbol === state.editingSymbol);
+    if (!index) return;
+    state.settings.indexOverrides[state.editingSymbol] = {
+      label: $('#instrument-label').value.trim(),
+      costPrice: numberOrNull('#instrument-cost'),
+      holdings: numberOrNull('#instrument-holdings'),
+      alertThreshold: numberOrNull('#instrument-alert-threshold')
+    };
+    saveStorage('stocker:settings', state.settings);
+    $('#instrument-dialog').close();
+    render();
+    refreshQuotes();
+    return;
+  }
   const item = state.watchlist.find((entry) => entry.symbol === state.editingSymbol);
   if (!item) return;
-  const numberOrNull = (selector) => { const value = $(selector).value.trim(); return value === '' ? null : Number(value); };
   item.label = $('#instrument-label').value.trim();
   item.costPrice = numberOrNull('#instrument-cost');
   item.holdings = numberOrNull('#instrument-holdings');
+  item.alertThreshold = numberOrNull('#instrument-alert-threshold');
   saveWatchlist();
   $('#instrument-dialog').close();
   render();
   renderManage();
+  refreshQuotes();
 });
 $('#settings-form').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -593,10 +952,15 @@ $('#settings-form').addEventListener('submit', async (event) => {
   state.settings.hideWindowFrame = hideWindowFrame;
   state.settings.globalShortcut = globalShortcut;
   state.settings.quoteProvider = $('#stock-provider').value;
+  state.settings.theme = $('#app-theme').value;
   state.settings.colorMode = document.querySelector('input[name="color-mode"]:checked').value;
   state.settings.namePinyin = $('#name-pinyin').checked;
+  state.settings.watchThresholds = Object.fromEntries(['stock', 'etf', 'index'].map((category) => {
+    const value = Number($(`#watch-threshold-${category}`).value);
+    return [category, Number.isFinite(value) && value > 0 ? value : 0];
+  }));
   state.settings.visibleColumns = visibleColumns.length ? visibleColumns : ['name'];
   saveStorage('stocker:settings', state.settings);
   applyDisplaySettings(); scheduleRefresh(); syncTrayBehavior(); render(); $('#settings-dialog').close();
 });
-renderMarketIndexOptions(); applyDisplaySettings(); render(); renderLatestUpdateTime(); scheduleRefresh(); syncTrayBehavior(); setGlobalShortcut(state.settings.globalShortcut).catch(console.error); setWindowDecorations(!state.settings.hideWindowFrame).catch(console.error); refreshQuotes();
+renderMarketIndexOptions(); applyDisplaySettings(); render(); renderWatchAlertPanel(); renderLatestUpdateTime(); scheduleRefresh(); syncTrayBehavior(); setGlobalShortcut(state.settings.globalShortcut).catch(console.error); setWindowDecorations(!state.settings.hideWindowFrame).catch(console.error); refreshQuotes();

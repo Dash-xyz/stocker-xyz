@@ -3,7 +3,7 @@ use pinyin::ToPinyin;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::PathBuf,
     sync::{
@@ -12,10 +12,12 @@ use std::{
     },
 };
 use tauri::{
-    AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewWindow, Window, WindowEvent,
+    image::Image, AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewWindow, Window,
+    WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_notification::NotificationExt;
 
 const DEFAULT_GLOBAL_SHORTCUT: &str = "Ctrl+Space";
 
@@ -51,6 +53,7 @@ struct AssetSearchResult {
     code: String,
     name: String,
     market: String,
+    asset_type: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -63,8 +66,16 @@ struct SavedWindowGeometry {
 
 struct TrayBehavior {
     minimize_to_tray: AtomicBool,
+    alert_active: AtomicBool,
+    alert_acknowledged: AtomicBool,
+    alert_phase: AtomicBool,
     suppress_focus_minimize_until: Mutex<Option<Instant>>,
     last_window_motion: Mutex<Instant>,
+}
+
+#[derive(Default)]
+struct WatchAlertDedup {
+    active: Mutex<HashMap<String, String>>,
 }
 
 #[derive(Default)]
@@ -76,6 +87,9 @@ impl Default for TrayBehavior {
     fn default() -> Self {
         Self {
             minimize_to_tray: AtomicBool::new(true),
+            alert_active: AtomicBool::new(false),
+            alert_acknowledged: AtomicBool::new(false),
+            alert_phase: AtomicBool::new(false),
             suppress_focus_minimize_until: Mutex::new(None),
             last_window_motion: Mutex::new(Instant::now()),
         }
@@ -128,6 +142,7 @@ fn reveal_main_window(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+        acknowledge_tray_alert(app);
     }
 }
 
@@ -183,9 +198,7 @@ fn toggle_main_window(app: &AppHandle) {
         let _ = window.hide();
     } else {
         suppress_focus_minimize(app);
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+        reveal_main_window(app);
     }
 }
 
@@ -206,15 +219,22 @@ fn toggle_global_shortcut_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    let is_open = window.is_visible().unwrap_or(false)
-        && !window.is_minimized().unwrap_or(false)
-        && window.is_focused().unwrap_or(false);
+    // Focus can still be reported as false immediately after the app's first window is shown.
+    // Visibility is the stable source of truth for the global show/hide toggle.
+    let is_open = main_window_is_open(
+        window.is_visible().unwrap_or(false),
+        window.is_minimized().unwrap_or(false),
+    );
     if is_open {
         let _ = minimize_main_window_or_hide(app);
     } else {
         suppress_focus_minimize(app);
         reveal_main_window(app);
     }
+}
+
+fn main_window_is_open(visible: bool, minimized: bool) -> bool {
+    visible && !minimized
 }
 
 fn open_settings(app: &AppHandle) {
@@ -258,9 +278,144 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+fn tray_alert_icon() -> Image<'static> {
+    const SIZE: usize = 32;
+    let mut rgba = vec![0; SIZE * SIZE * 4];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let distance_x = x as i32 - 15;
+            let distance_y = y as i32 - 15;
+            if distance_x * distance_x + distance_y * distance_y > 13 * 13 {
+                continue;
+            }
+            let offset = (y * SIZE + x) * 4;
+            rgba[offset..offset + 4].copy_from_slice(&[156, 67, 62, 255]);
+        }
+    }
+    for y in 8..20 {
+        for x in 14..18 {
+            let offset = (y * SIZE + x) * 4;
+            rgba[offset..offset + 4].copy_from_slice(&[250, 244, 239, 255]);
+        }
+    }
+    for y in 23..26 {
+        for x in 14..18 {
+            let offset = (y * SIZE + x) * 4;
+            rgba[offset..offset + 4].copy_from_slice(&[250, 244, 239, 255]);
+        }
+    }
+    Image::new_owned(rgba, SIZE as u32, SIZE as u32)
+}
+
+fn update_tray_alert_icon(app: &AppHandle, alert_phase: bool) {
+    let Some(tray) = app.tray_by_id("stocker-tray") else {
+        return;
+    };
+    if alert_phase {
+        let _ = tray.set_icon(Some(tray_alert_icon()));
+        let _ = tray.set_tooltip(Some("Stocker - 盯盘提醒"));
+    } else if let Some(icon) = app.default_window_icon().cloned() {
+        let _ = tray.set_icon(Some(icon));
+        let _ = tray.set_tooltip(Some("Stocker"));
+    }
+}
+
+fn start_tray_alert_blinker(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(600));
+        let state = app.state::<TrayBehavior>();
+        if state.alert_active.load(Ordering::Relaxed)
+            && !state.alert_acknowledged.load(Ordering::Relaxed)
+        {
+            let alert_phase = !state.alert_phase.fetch_xor(true, Ordering::Relaxed);
+            update_tray_alert_icon(&app, alert_phase);
+        } else if state.alert_phase.swap(false, Ordering::Relaxed) {
+            update_tray_alert_icon(&app, false);
+        }
+    });
+}
+
 #[tauri::command]
 fn set_minimize_to_tray(enabled: bool, state: tauri::State<TrayBehavior>) {
     state.minimize_to_tray.store(enabled, Ordering::Relaxed);
+}
+
+fn acknowledge_tray_alert(app: &AppHandle) {
+    let state = app.state::<TrayBehavior>();
+    state.alert_acknowledged.store(true, Ordering::Relaxed);
+    state.alert_phase.store(false, Ordering::Relaxed);
+    update_tray_alert_icon(app, false);
+}
+
+#[tauri::command]
+fn set_tray_alert_active(app: AppHandle, active: bool, new_alert: bool) {
+    let state = app.state::<TrayBehavior>();
+    state.alert_active.store(active, Ordering::Relaxed);
+    if !active {
+        state.alert_acknowledged.store(false, Ordering::Relaxed);
+        state.alert_phase.store(false, Ordering::Relaxed);
+        update_tray_alert_icon(&app, false);
+    } else if new_alert {
+        state.alert_acknowledged.store(false, Ordering::Relaxed);
+        state.alert_phase.store(true, Ordering::Relaxed);
+        update_tray_alert_icon(&app, true);
+    }
+}
+
+fn update_watch_alert_breach(
+    active: &mut HashMap<String, String>,
+    symbol: &str,
+    threshold_key: &str,
+    is_breached: bool,
+    already_alerted: bool,
+) -> bool {
+    if !is_breached {
+        active.remove(symbol);
+        return false;
+    }
+    if active
+        .get(symbol)
+        .is_some_and(|stored| stored == threshold_key)
+    {
+        return false;
+    }
+    active.insert(symbol.to_string(), threshold_key.to_string());
+    !already_alerted
+}
+
+#[tauri::command]
+fn evaluate_watch_alert_breach(
+    symbol: String,
+    threshold_key: String,
+    is_breached: bool,
+    already_alerted: bool,
+    state: tauri::State<WatchAlertDedup>,
+) -> Result<bool, String> {
+    let mut active = state
+        .active
+        .lock()
+        .map_err(|_| "watch alert state unavailable".to_string())?;
+    Ok(update_watch_alert_breach(
+        &mut active,
+        &symbol,
+        &threshold_key,
+        is_breached,
+        already_alerted,
+    ))
+}
+
+#[tauri::command]
+fn clear_watch_alert_breach(
+    symbol: String,
+    state: tauri::State<WatchAlertDedup>,
+) -> Result<(), String> {
+    let mut active = state
+        .active
+        .lock()
+        .map_err(|_| "watch alert state unavailable".to_string())?;
+    active.remove(&symbol);
+    Ok(())
 }
 
 #[tauri::command]
@@ -344,6 +499,16 @@ fn toggle_maximize_main_window(app: AppHandle) -> Result<bool, String> {
 fn close_main_window(app: AppHandle) -> Result<(), String> {
     main_window(&app)?
         .close()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn show_watch_alert(app: AppHandle, title: String, body: String) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
         .map_err(|error| error.to_string())
 }
 
@@ -500,6 +665,11 @@ fn parse_search_result(entry: &str) -> Option<AssetSearchResult> {
         code: display_code,
         name: name.to_string(),
         market: market.to_string(),
+        asset_type: if matches!(asset_type, "ETF" | "LOF" | "FUND") {
+            "etf".to_string()
+        } else {
+            "stock".to_string()
+        },
     })
 }
 
@@ -561,6 +731,7 @@ fn now() -> u128 {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _, event| {
@@ -571,17 +742,22 @@ pub fn run() {
                 .build(),
         )
         .manage(TrayBehavior::default())
+        .manage(WatchAlertDedup::default())
         .manage(GlobalShortcutConfig::default())
         .invoke_handler(tauri::generate_handler![
             fetch_quotes,
             search_assets,
             set_minimize_to_tray,
+            set_tray_alert_active,
+            evaluate_watch_alert_breach,
+            clear_watch_alert_breach,
             set_auto_start,
             set_global_shortcut,
             set_window_decorations,
             minimize_main_window,
             toggle_maximize_main_window,
-            close_main_window
+            close_main_window,
+            show_watch_alert
         ])
         .setup(|app| {
             if let Err(error) = update_global_shortcut(&app.handle(), DEFAULT_GLOBAL_SHORTCUT) {
@@ -590,9 +766,12 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 restore_window_geometry(&window);
             }
-            create_tray(app).map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
+            create_tray(app).map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
+            start_tray_alert_blinker(&app.handle());
+            Ok(())
         })
         .on_window_event(|window, event| match event {
+            WindowEvent::Focused(true) => acknowledge_tray_alert(window.app_handle()),
             WindowEvent::CloseRequested { api, .. } => {
                 save_window_geometry(window);
                 api.prevent_close();
@@ -631,7 +810,69 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_search_result, romanize_name};
+    use super::{
+        main_window_is_open, parse_search_result, romanize_name, update_watch_alert_breach,
+    };
+    use std::collections::HashMap;
+
+    #[test]
+    fn treats_first_visible_window_as_open_without_requiring_focus() {
+        assert!(main_window_is_open(true, false));
+        assert!(!main_window_is_open(false, false));
+        assert!(!main_window_is_open(true, true));
+    }
+
+    #[test]
+    fn only_records_a_watch_alert_once_until_cleared() {
+        let mut active = HashMap::new();
+        assert!(update_watch_alert_breach(
+            &mut active,
+            "hk02513",
+            "5.000000",
+            true,
+            false
+        ));
+        assert!(!update_watch_alert_breach(
+            &mut active,
+            "hk02513",
+            "5.000000",
+            true,
+            false
+        ));
+        assert!(!update_watch_alert_breach(
+            &mut active,
+            "hk02513",
+            "5.000000",
+            false,
+            false
+        ));
+        assert!(update_watch_alert_breach(
+            &mut active,
+            "hk02513",
+            "5.000000",
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn restores_persisted_watch_alert_without_retriggering() {
+        let mut active = HashMap::new();
+        assert!(!update_watch_alert_breach(
+            &mut active,
+            "hk02513",
+            "5.000000",
+            true,
+            true
+        ));
+        assert!(!update_watch_alert_breach(
+            &mut active,
+            "hk02513",
+            "5.000000",
+            true,
+            false
+        ));
+    }
 
     #[test]
     fn normalizes_stock_search_results_for_every_market() {
